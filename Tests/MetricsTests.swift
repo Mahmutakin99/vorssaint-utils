@@ -53,6 +53,10 @@ struct MetricsTests {
         expectEqual(MetricFormat.diskBytes(123_456_789_000), "123 GB", "disk bytes match Finder-style GB")
         expectEqual(MetricFormat.diskBytesPrecise(14_878_047_232_000), "14.88 TB",
                     "precise disk bytes keep SMART totals readable")
+        expectEqual(MetricFormat.diskBenchmarkRate(85_260_000), "85.3 MB/s",
+                    "disk benchmark rates use decimal megabytes with useful precision")
+        expectEqual(MetricFormat.diskBenchmarkRate(500_000_000), "500 MB/s",
+                    "fast disk benchmark rates stay compact")
 
         expectEqual(MetricFormat.bytesPerSec(0), "0 B/s", "rate zero")
         expectEqual(MetricFormat.bytesPerSec(2 * 1024 * 1024), "2.0 MB/s", "rate 2M")
@@ -155,6 +159,339 @@ struct MetricsTests {
         expect(smart?.powerOnHours == 12, "SMART reading includes power-on hours")
         expect(smart?.unsafeShutdowns == 13, "SMART reading includes unsafe shutdowns")
         expect(smart?.mediaErrors == 14, "SMART reading includes media errors")
+
+        let diskDevice = DiskDeviceReading(
+            id: "disk3s1",
+            name: "Macintosh HD",
+            mountPath: "/",
+            bsdName: "disk3s1",
+            wholeDisk: "disk3",
+            ioCounterID: "disk3",
+            fileSystem: "APFS",
+            totalBytes: 245_000_000_000,
+            freeBytes: 110_000_000_000,
+            usedBytes: 163_000_000_000,
+            isInternal: true,
+            isRemovable: false,
+            isEjectable: false,
+            smart: nil,
+            readBytesPerSec: nil,
+            writeBytesPerSec: nil,
+            totalReadBytes: nil,
+            totalWrittenBytes: nil
+        )
+        expectClose(diskDevice.usedFraction, 163.0 / 245.0, "disk used fraction reflects physical used bytes")
+
+        // MARK: Disk benchmark support
+
+        expect(DiskBenchmarkMode.quick.byteCount == 1_000_000_000,
+               "quick disk benchmark writes one decimal gigabyte")
+        expect(DiskBenchmarkMode.standard.byteCount == 4_000_000_000,
+               "standard disk benchmark writes four decimal gigabytes")
+        expect(DiskBenchmarkMode.quick.passCount == 1,
+               "quick disk benchmark measures one pass")
+        expect(DiskBenchmarkMode.standard.passCount == 3,
+               "standard disk benchmark measures three passes")
+        expect(DiskBenchmarkSupport.hasEnoughSpace(mode: .quick, availableBytes: 3_000_000_000),
+               "disk benchmark accepts the exact free-space boundary")
+        expect(!DiskBenchmarkSupport.hasEnoughSpace(mode: .quick, availableBytes: 2_999_999_999),
+               "disk benchmark rejects one byte below its free-space boundary")
+        expect(DiskBenchmarkSupport.availableCapacity(
+            importantUsage: 0,
+            regular: 1_023_789_338_624,
+            fileSystem: nil
+        ) == 1_023_789_338_624,
+               "disk benchmark falls back when important-usage capacity incorrectly reports zero")
+        expect(DiskBenchmarkSupport.availableCapacity(
+            importantUsage: nil,
+            regular: 0,
+            fileSystem: 39_378_092_032
+        ) == 39_378_092_032,
+               "disk benchmark falls back to filesystem capacity when URL capacities are zero")
+        expectClose(DiskBenchmarkSupport.median([3256, 2746, 3010]) ?? -1,
+                    3010,
+                    "disk benchmark reports the median of three passes")
+        expect(DiskBenchmarkSupport.median([]) == nil,
+               "disk benchmark rejects an empty measurement set")
+        expect(DiskBenchmarkSupport.shouldFallbackToFSync(afterFullSyncError: ENOTSUP),
+               "disk benchmark falls back when full sync is unsupported")
+        expect(!DiskBenchmarkSupport.shouldFallbackToFSync(afterFullSyncError: EIO),
+               "disk benchmark surfaces real full-sync I/O failures")
+        expectClose(DiskBenchmarkSupport.bytesPerSecond(byteCount: 1_000_000_000, duration: 2) ?? -1,
+                    500_000_000,
+                    "disk benchmark rate uses elapsed seconds")
+        expect(DiskBenchmarkSupport.bytesPerSecond(byteCount: 1_000_000_000, duration: 0) == nil,
+               "disk benchmark rejects a zero duration")
+        expect(DiskBenchmarkSupport.normalizedVolumeUUID("  A1B2-C3D4  ") == "a1b2-c3d4",
+               "disk benchmark normalizes stable volume identifiers")
+        expect(DiskBenchmarkSupport.physicalWholeDisk(from: "/dev/disk12s3") == "disk12",
+               "disk benchmark reduces a volume slice to its physical disk")
+        expect(DiskBenchmarkSupport.refersToSamePhysicalDisk("disk4s2", "disk4"),
+               "disk benchmark accepts slices of the same physical disk")
+        expect(!DiskBenchmarkSupport.refersToSamePhysicalDisk("disk4s2", "disk5s1"),
+               "disk benchmark rejects a different physical disk")
+        var diskEjectionCheckedBenchmarkState = false
+        let guardedDiskEjection = DiskEjectionSafety(isDiskBenchmarkRunning: {
+            diskEjectionCheckedBenchmarkState = true
+            return true
+        })
+        expect(!guardedDiskEjection.allowsEjection && diskEjectionCheckedBenchmarkState,
+               "disk ejection is blocked while a benchmark is running")
+
+        var firstPattern = [UInt8](repeating: 0xA5, count: 8_192)
+        var secondPattern = firstPattern
+        firstPattern.withUnsafeMutableBytes { bytes in
+            guard let baseAddress = bytes.baseAddress else { return }
+            DiskBenchmarkSupport.applyPatternMarkers(to: baseAddress,
+                                                      byteCount: bytes.count,
+                                                      passIndex: 0,
+                                                      chunkIndex: 0)
+        }
+        secondPattern.withUnsafeMutableBytes { bytes in
+            guard let baseAddress = bytes.baseAddress else { return }
+            DiskBenchmarkSupport.applyPatternMarkers(to: baseAddress,
+                                                      byteCount: bytes.count,
+                                                      passIndex: 1,
+                                                      chunkIndex: 0)
+        }
+        expect(firstPattern != secondPattern,
+               "disk benchmark writes a distinct incompressible pattern on each pass")
+        var verifiedPattern = firstPattern
+        let matchingBuffers = firstPattern.withUnsafeBytes { expected in
+            verifiedPattern.withUnsafeBytes { actual in
+                guard let expectedBase = expected.baseAddress,
+                      let actualBase = actual.baseAddress else { return false }
+                return DiskBenchmarkSupport.buffersMatch(expectedBase,
+                                                         actualBase,
+                                                         byteCount: expected.count)
+            }
+        }
+        expect(matchingBuffers,
+               "disk benchmark accepts an unchanged read-back buffer")
+        verifiedPattern[4_096] ^= 0x01
+        let mismatchingBuffers = firstPattern.withUnsafeBytes { expected in
+            verifiedPattern.withUnsafeBytes { actual in
+                guard let expectedBase = expected.baseAddress,
+                      let actualBase = actual.baseAddress else { return true }
+                return DiskBenchmarkSupport.buffersMatch(expectedBase,
+                                                         actualBase,
+                                                         byteCount: expected.count)
+            }
+        }
+        expect(!mismatchingBuffers,
+               "disk benchmark detects changed read-back data")
+
+        let benchmarkSuite = "com.vorssaint.tests.diskBenchmark"
+        let benchmarkDefaults = UserDefaults(suiteName: benchmarkSuite)!
+        benchmarkDefaults.removePersistentDomain(forName: benchmarkSuite)
+        let benchmarkStore = DiskBenchmarkResultStore(defaults: benchmarkDefaults,
+                                                       key: "diskBenchmarkResults.test")
+        let storedBenchmark = DiskBenchmarkResult(
+            id: UUID(),
+            volumeUUID: "VOLUME-1",
+            sessionDiskID: "/Volumes/Test",
+            diskName: "Test",
+            fileSystem: "APFS",
+            mode: .quick,
+            readBytesPerSecond: 500_000_000,
+            writeBytesPerSecond: 400_000_000,
+            measuredAt: Date(timeIntervalSince1970: 100)
+        )
+        benchmarkStore.save(storedBenchmark)
+        expect(benchmarkStore.result(volumeUUID: "volume-1", sessionDiskID: "ignored") == storedBenchmark,
+               "disk benchmark store matches normalized volume identifiers")
+        benchmarkDefaults.removePersistentDomain(forName: benchmarkSuite)
+
+        let benchmarkRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent("vorssaint-disk-benchmark-tests-\(UUID().uuidString)", isDirectory: true)
+        try? FileManager.default.createDirectory(at: benchmarkRoot, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: benchmarkRoot) }
+        let tinyBenchmarkConfiguration = DiskBenchmarkRunConfiguration(
+            byteCount: 8 * 1_048_576,
+            chunkSize: 1_048_576,
+            requiredAvailableBytes: 0,
+            requiresNoCache: true,
+            passCount: 3
+        )
+        expect(tinyBenchmarkConfiguration.totalProgressBytes == 48 * 1_048_576,
+               "disk benchmark progress counts both writing and reading for every pass")
+        let overflowingBenchmarkConfiguration = DiskBenchmarkRunConfiguration(
+            byteCount: UInt64.max,
+            chunkSize: 1,
+            requiredAvailableBytes: 0,
+            requiresNoCache: false,
+            passCount: 1
+        )
+        expect(overflowingBenchmarkConfiguration.totalProgressBytes == nil,
+               "disk benchmark rejects overflowing progress totals")
+        let tinyRunner = DiskBenchmarkRunner(configuration: tinyBenchmarkConfiguration)
+        var benchmarkPhases = Set<DiskBenchmarkPhase>()
+        var maximumReadProgress: UInt64 = 0
+        var benchmarkProgressUpdates: [DiskBenchmarkProgress] = []
+        var scratchFileStayedHidden = true
+        do {
+            let measurement = try tinyRunner.run(
+                in: benchmarkRoot,
+                cancellation: DiskBenchmarkCancellationToken()
+            ) { progress in
+                benchmarkPhases.insert(progress.phase)
+                benchmarkProgressUpdates.append(progress)
+                if progress.phase == .reading {
+                    maximumReadProgress = max(maximumReadProgress, progress.completedBytes)
+                }
+                let contents = (try? FileManager.default.contentsOfDirectory(atPath: benchmarkRoot.path)) ?? []
+                scratchFileStayedHidden = scratchFileStayedHidden && contents.isEmpty
+            }
+            expect(measurement.readBytesPerSecond > 0 && measurement.writeBytesPerSecond > 0,
+                   "disk benchmark runner reports positive sequential rates")
+            expect(benchmarkPhases.contains(.writing) && benchmarkPhases.contains(.flushing)
+                    && benchmarkPhases.contains(.reading),
+                   "disk benchmark runner reports every I/O phase")
+            expect(maximumReadProgress == 48 * 1_048_576,
+                   "disk benchmark runner completes all configured passes")
+            expect(benchmarkProgressUpdates.allSatisfy { $0.totalBytes == 48 * 1_048_576 },
+                   "disk benchmark runner publishes one stable progress total")
+            expect(zip(benchmarkProgressUpdates, benchmarkProgressUpdates.dropFirst()).allSatisfy {
+                $0.completedBytes <= $1.completedBytes
+            }, "disk benchmark progress never moves backwards")
+            expect(benchmarkProgressUpdates.last?.completedBytes == 48 * 1_048_576,
+                   "disk benchmark progress reaches its exact total")
+            expect(scratchFileStayedHidden,
+                   "disk benchmark scratch file is unlinked before measured I/O begins")
+        } catch {
+            expect(false, "tiny disk benchmark completes: \(error)")
+        }
+
+        expect(DiskBenchmarkSupport.shouldFallbackFromNoCache(errorCode: ENOTSUP)
+                && DiskBenchmarkSupport.shouldFallbackFromNoCache(errorCode: EINVAL)
+                && DiskBenchmarkSupport.shouldFallbackFromNoCache(errorCode: ENOTTY),
+               "disk benchmark recognizes unsupported no-cache errors")
+        expect(!DiskBenchmarkSupport.shouldFallbackFromNoCache(errorCode: EIO),
+               "disk benchmark surfaces real no-cache I/O failures")
+        let noCacheTestConfiguration = DiskBenchmarkRunConfiguration(
+            byteCount: 1_048_576,
+            chunkSize: 1_048_576,
+            requiredAvailableBytes: 0,
+            requiresNoCache: true
+        )
+        var unsupportedNoCacheAttempts = 0
+        let unsupportedNoCacheRunner = DiskBenchmarkRunner(
+            configuration: noCacheTestConfiguration,
+            setNoCache: { _ in
+                unsupportedNoCacheAttempts += 1
+                errno = ENOTSUP
+                return -1
+            }
+        )
+        do {
+            let measurement = try unsupportedNoCacheRunner.run(
+                in: benchmarkRoot,
+                cancellation: DiskBenchmarkCancellationToken(),
+                progress: { _ in }
+            )
+            expect(unsupportedNoCacheAttempts == 1
+                    && measurement.readBytesPerSecond > 0
+                    && measurement.writeBytesPerSecond > 0,
+                   "disk benchmark falls back to normal I/O when no-cache is unsupported")
+        } catch {
+            expect(false, "unsupported no-cache falls back: \(error)")
+        }
+        let failingNoCacheRunner = DiskBenchmarkRunner(
+            configuration: noCacheTestConfiguration,
+            setNoCache: { _ in
+                errno = EIO
+                return -1
+            }
+        )
+        do {
+            _ = try failingNoCacheRunner.run(
+                in: benchmarkRoot,
+                cancellation: DiskBenchmarkCancellationToken(),
+                progress: { _ in }
+            )
+            expect(false, "real no-cache I/O failures stop the benchmark")
+        } catch let failure as DiskBenchmarkFailure {
+            expect(failure == .cacheControl(code: EIO),
+                   "disk benchmark preserves real no-cache I/O failures")
+        } catch {
+            expect(false, "real no-cache I/O failure keeps its error type: \(error)")
+        }
+
+        let benchmarkDisk = DiskDeviceReading(
+            id: benchmarkRoot.path,
+            name: "Benchmark Target",
+            mountPath: benchmarkRoot.path,
+            bsdName: DiskBenchmarkSupport.bsdIdentifier(at: benchmarkRoot),
+            wholeDisk: DiskBenchmarkSupport.bsdIdentifier(at: benchmarkRoot),
+            ioCounterID: nil,
+            fileSystem: "APFS",
+            volumeUUID: "SERVICE-DISK",
+            totalBytes: 20_000_000_000,
+            freeBytes: 10_000_000_000,
+            usedBytes: 10_000_000_000,
+            isInternal: false,
+            isRemovable: true,
+            isEjectable: true,
+            isReadOnly: false,
+            smart: nil,
+            readBytesPerSec: nil,
+            writeBytesPerSec: nil,
+            totalReadBytes: nil,
+            totalWrittenBytes: nil
+        )
+        let serviceSuite = "com.vorssaint.tests.diskBenchmarkService"
+        let serviceDefaults = UserDefaults(suiteName: serviceSuite)!
+        serviceDefaults.removePersistentDomain(forName: serviceSuite)
+        let benchmarkService = DiskBenchmarkService(
+            store: DiskBenchmarkResultStore(defaults: serviceDefaults,
+                                            key: "diskBenchmarkServiceResults.test"),
+            configurationForMode: { _ in
+                DiskBenchmarkRunConfiguration(byteCount: 8 * 1_048_576,
+                                              chunkSize: 1_048_576,
+                                              requiredAvailableBytes: 0,
+                                              requiresNoCache: true)
+            },
+            directoryForDisk: { _ in benchmarkRoot }
+        )
+        benchmarkService.start(disk: benchmarkDisk, mode: .quick)
+        let serviceDeadline = Date(timeIntervalSinceNow: 10)
+        while benchmarkService.isRunning && Date() < serviceDeadline {
+            _ = RunLoop.current.run(mode: .default, before: Date(timeIntervalSinceNow: 0.01))
+        }
+        if case let .completed(result) = benchmarkService.state {
+            expect(result.diskName == "Benchmark Target"
+                    && result.readBytesPerSecond > 0
+                    && result.writeBytesPerSecond > 0,
+                   "disk benchmark service publishes its completed measurement")
+        } else {
+            expect(false, "disk benchmark service completes its real runner: \(benchmarkService.state)")
+        }
+        var readOnlyDisk = benchmarkDisk
+        readOnlyDisk.id = "read-only-test"
+        readOnlyDisk.mountPath = "/Volumes/Read Only"
+        readOnlyDisk.isReadOnly = true
+        expect(readOnlyDisk.isBenchmarkReadOnly,
+               "an external read-only volume cannot be benchmarked")
+        benchmarkService.start(disk: readOnlyDisk, mode: .quick)
+        expect(benchmarkService.state == .failed(diskID: readOnlyDisk.id, failure: .readOnly),
+               "disk benchmark service rejects read-only media before I/O")
+        serviceDefaults.removePersistentDomain(forName: serviceSuite)
+
+        let diskBenchmarkStrings = [Strings.enUS, .ptBR, .tr, .ru, .es, .de, .fr, .it,
+                                    .ja, .ko, .zhHans, .zhTW, .zhHK]
+        for strings in diskBenchmarkStrings {
+            let requiredValues = [strings.diskSpeedTest, strings.diskSpeedQuick,
+                                  strings.diskSpeedStandard, strings.diskSpeedDescription,
+                                  strings.diskSpeedPreparing, strings.diskSpeedFlushing,
+                                  strings.diskSpeedLastTest, strings.diskSpeedNeedsSpace,
+                                  strings.diskSpeedReadOnly, strings.diskSpeedUnavailable]
+            expect(requiredValues.allSatisfy { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty },
+                   "every language provides the disk benchmark interface")
+            expect(strings.diskSpeedStandard.contains("3") && strings.diskSpeedStandard.contains("4"),
+                   "every language discloses the standard benchmark's three four-gigabyte passes")
+            expectFormat(strings.diskSpeedNeedsSpace, ["@"],
+                         "disk benchmark free-space message keeps one value in \(strings.diskSpeedTest)")
+        }
 
         // MARK: Clipboard history search
 

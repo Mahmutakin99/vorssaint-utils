@@ -16,19 +16,25 @@ final class DiskProtectionService: ObservableObject {
     static let shared = DiskProtectionService()
 
     @Published private(set) var states: [String: DiskEjectState] = [:]
+    private let diskEjectionSafety: DiskEjectionSafety
 
-    private init() {}
+    internal init(isDiskBenchmarkRunning: @escaping () -> Bool = {
+        DiskBenchmarkService.shared.isRunning
+    }) {
+        diskEjectionSafety = DiskEjectionSafety(isDiskBenchmarkRunning: isDiskBenchmarkRunning)
+    }
 
     func state(for disk: DiskDeviceReading) -> DiskEjectState? {
         states[disk.id]
     }
 
     func ejectAll(_ disks: [DiskDeviceReading]) {
+        guard diskEjectionSafety.allowsEjection else { return }
         uniqueEjectableDisks(from: disks).forEach(eject)
     }
 
     func eject(_ disk: DiskDeviceReading) {
-        guard disk.canEject else { return }
+        guard diskEjectionSafety.allowsEjection, disk.canEject else { return }
         DispatchQueue.main.async {
             self.states[disk.id] = .ejecting
         }

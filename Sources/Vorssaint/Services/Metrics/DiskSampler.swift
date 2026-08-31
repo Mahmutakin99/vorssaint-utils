@@ -51,17 +51,19 @@ final class DiskSampler {
             return DiskDeviceReading(id: volume.mountPath,
                                      name: volume.name,
                                      mountPath: volume.mountPath,
-                                     bsdName: metadata.bsdName,
+                                     bsdName: metadata.bsdName ?? volume.bsdName,
                                      wholeDisk: wholeDisk,
                                      ioCounterID: counter?.id,
                                      fileSystem: metadata.fileSystem
                                          ?? DiskSupport.fileSystemLabel(type: volume.fileSystemType),
+                                     volumeUUID: volume.volumeUUID,
                                      totalBytes: capacity.total,
                                      freeBytes: capacity.free,
                                      usedBytes: capacity.used,
                                      isInternal: isInternal,
                                      isRemovable: isRemovable,
                                      isEjectable: isEjectable,
+                                     isReadOnly: volume.isReadOnly,
                                      smart: metadata.smart,
                                      readBytesPerSec: rates.readBytesPerSec,
                                      writeBytesPerSec: rates.writeBytesPerSec,
@@ -159,6 +161,8 @@ final class DiskSampler {
         var isInternal: Bool
         var isRemovable: Bool
         var isEjectable: Bool
+        var isReadOnly: Bool
+        var volumeUUID: String?
         var bsdName: String?
         var fileSystemType: String?
     }
@@ -174,6 +178,8 @@ final class DiskSampler {
             .volumeIsRemovableKey,
             .volumeIsEjectableKey,
             .volumeIsLocalKey,
+            .volumeIsReadOnlyKey,
+            .volumeUUIDStringKey,
         ]
         guard let urls = FileManager.default.mountedVolumeURLs(includingResourceValuesForKeys: Array(keys),
                                                                options: [.skipHiddenVolumes]) else {
@@ -200,6 +206,8 @@ final class DiskSampler {
                                  isInternal: values.volumeIsInternal ?? false,
                                  isRemovable: values.volumeIsRemovable ?? false,
                                  isEjectable: values.volumeIsEjectable ?? false,
+                                 isReadOnly: values.volumeIsReadOnly ?? false,
+                                 volumeUUID: values.volumeUUIDString,
                                  bsdName: identity.bsdName,
                                  fileSystemType: identity.fileSystemType)
         }

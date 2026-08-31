@@ -30,12 +30,14 @@ struct DiskDeviceReading: Identifiable, Equatable {
     var wholeDisk: String?
     var ioCounterID: String?
     var fileSystem: String?
+    var volumeUUID: String? = nil
     var totalBytes: UInt64
     var freeBytes: UInt64
     var usedBytes: UInt64
     var isInternal: Bool
     var isRemovable: Bool
     var isEjectable: Bool
+    var isReadOnly: Bool = false
     var smart: DiskSMARTReading?
     var readBytesPerSec: Double?
     var writeBytesPerSec: Double?
@@ -49,6 +51,10 @@ struct DiskDeviceReading: Identifiable, Equatable {
 
     var canEject: Bool {
         !isInternal && (isEjectable || isRemovable) && ejectBSDName != nil
+    }
+
+    var isBenchmarkReadOnly: Bool {
+        isReadOnly && mountPath != "/"
     }
 
     var ejectBSDName: String? {
