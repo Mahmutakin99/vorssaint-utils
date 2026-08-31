@@ -70,6 +70,9 @@ struct MetricsTests {
 
         // MARK: Disk helpers
 
+        expect(DiskBenchmarkMode.quick.byteCount == 1_000_000_000,
+               "quick disk benchmark writes one decimal gigabyte")
+
         expect(DiskSupport.nvmeBytes(low: 2, high: nil) == 1_024_000,
                "NVMe data units convert to 512,000 byte units")
         expect(DiskSupport.nvmeBytes(low: 1, high: 1) == 2_199_023_256_064_000,
